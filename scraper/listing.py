@@ -11,6 +11,7 @@ from __future__ import annotations
 import random
 import re
 import time
+import unicodedata
 from dataclasses import dataclass
 
 from playwright.sync_api import Locator, Page, TimeoutError as PlaywrightTimeoutError, sync_playwright
@@ -30,6 +31,10 @@ class Exhibitor:
     country: str
     booth: str
     detail_url: str
+    profile_slug: str  # for https://www.cphi-online.com/company/{slug}/
+
+
+SLUG_FROM_IMG_PATTERN = re.compile(r"/company/([^/?#]+)/")
 
 
 def _jittered_sleep(base: float = 1.5, jitter: float = 0.7) -> None:
@@ -48,6 +53,31 @@ def _safe_attr(locator: Locator, attr: str) -> str:
     return (locator.first.get_attribute(attr) or "").strip()
 
 
+def slugify_company_name(name: str) -> str:
+    """Best-effort guess at the CPHI URL slug for a company name.
+
+    CPHI lowercases the name, strips accents, replaces any run of
+    non-alphanumerics with a single hyphen, and trims hyphens.
+    Used as a fallback when the card has no custom logo (so no
+    slug-bearing image URL to extract from).
+    """
+    if not name:
+        return ""
+    folded = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii")
+    folded = folded.lower()
+    folded = re.sub(r"[^a-z0-9]+", "-", folded)
+    return folded.strip("-")
+
+
+def _extract_slug(card: Locator, fallback_name: str) -> str:
+    for img in card.locator("img[src*='/company/']").all():
+        src = img.get_attribute("src") or ""
+        m = SLUG_FROM_IMG_PATTERN.search(src)
+        if m:
+            return m.group(1)
+    return slugify_company_name(fallback_name)
+
+
 def _extract_card(card: Locator) -> Exhibitor | None:
     name = _safe_text(card.locator(".exhibitor__title h3"))
     if not name:
@@ -59,7 +89,14 @@ def _extract_card(card: Locator) -> Exhibitor | None:
         card.locator("a.btn-outline-secondary[href*='exhibitor']"),
         "href",
     )
-    return Exhibitor(name=name, country=country, booth=booth, detail_url=detail_url)
+    slug = _extract_slug(card, fallback_name=name)
+    return Exhibitor(
+        name=name,
+        country=country,
+        booth=booth,
+        detail_url=detail_url,
+        profile_slug=slug,
+    )
 
 
 def _extract_visible_exhibitors(page: Page) -> list[Exhibitor]:

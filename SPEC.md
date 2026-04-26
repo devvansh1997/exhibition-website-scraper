@@ -49,18 +49,19 @@ One CSV per run. Filename: `output/{industry}_{exhibition_name}_{year}_{run_id}.
 |---|---|---|---|
 | `exhibition_name` | string | input | e.g. "CPHI Milan" — constant per run |
 | `exhibition_year` | int | input | e.g. 2026 — constant per run |
-| `exhibition_url` | string | input | the source URL — constant per run |
 | `industry` | string | input | e.g. "Pharma" — for cross-show analytics |
-| `scraped_at` | ISO datetime | runtime | UTC, constant per run |
-| `company_name` | string | listing page | required |
-| `company_detail_url` | string | listing page | link to exhibitor page on the platform |
-| `company_website` | string | detail page or Google fallback | may be empty |
-| `country` | string | detail page or listing filter | may be empty |
-| `booth_number` | string | detail page | may be empty |
-| `product_categories` | string | detail page | semicolon-separated |
-| `contact_email` | string | company website extraction | may be empty |
-| `email_source` | enum | runtime | `detail_page` \| `company_website` \| `llm_extracted` \| `not_found` |
-| `email_confidence` | enum | runtime | `high` (regex match on contact page) \| `medium` (LLM-extracted) \| `low` (homepage scrape) |
+| `exhibition_url` | string | input | the source URL — constant per run |
+| `scraped_at` | string | runtime | `YYYYMMDDTHHMMSSZ` UTC, constant per run |
+| `company_name` | string | profile JSON-LD or listing | required |
+| `country` | string | listing | from the card's country line |
+| `booth_number` | string | listing | from the card's booth tag |
+| `company_email` | string | profile JSON-LD | named or generic; may be empty (~25% of rows) |
+| `company_phone` | string | profile JSON-LD | nearly always present (~100%) |
+| `company_website` | string | derived from email domain | empty when no email; v0.3 will close this gap |
+| `address` | string | profile JSON-LD | "street, city, region, postal, country code" |
+| `company_profile_url` | string | derived from slug | `https://www.cphi-online.com/company/{slug}/` |
+| `email_source` | enum | runtime | `jsonld` \| `not_found` (v0.3 will add `company_website`, `llm`) |
+| `email_confidence` | enum | runtime | `high` (JSON-LD) \| `""` (none) |
 | `notes` | string | runtime | freeform — errors, fallbacks taken, ambiguities |
 
 Tagging columns (`exhibition_name`, `year`, `industry`) are constants for the run — they exist on every row so a downstream `pandas.concat([...])` of multiple CSVs gives a single analyzable frame.
@@ -156,37 +157,37 @@ exhibition-website-scraper/
 - Per card extract: `company_name`, `company_detail_url`
 - **Throttle:** 1.5s between "show more" clicks; jittered.
 
-### 7.2 Detail page (`cphi-online.com/company/{slug}/`)
+### 7.2 Company profile page (`cphi-online.com/company/{slug}/`)
 
-- **Known issue:** initial probe returned HTTP 403. Likely user-agent or referer check. Mitigation:
-  - Use Playwright (real browser, real headers) instead of httpx
-  - Set referer = listing page
-  - If still 403 after retry, log, continue, mark website as missing — Stage 3 will Google-search the company name as fallback
-- Extract: `company_website`, `country`, `booth_number`, `product_categories`
-- **Throttle:** 2s between detail page fetches; jittered.
-- **Cache:** save raw HTML to `cache/detail/{slug}.html`. Re-runs skip cached pages unless `--no-cache`.
+**Big finding from initial probing:** every CPHI company-profile page contains a `<script type="application/ld+json">` Organization block with structured `name`, `telephone`, `email`, and `address` (street/city/region/postal/country code). Parsing JSON-LD is more reliable than scraping the rendered DOM, and saves us from having to find external company websites for the majority of leads.
 
-### 7.3 Company website → email
+The 403 my earlier WebFetch hit was a user-agent issue — Playwright (real browser headers + referer set to the listing) gets HTTP 200.
 
-For each company with a website:
-1. Fetch homepage with httpx (timeout 15s, follow redirects)
-2. If response is mostly empty (likely JS-rendered SPA), retry with Playwright
-3. Find candidate contact pages: links with text matching `/contact|about|reach.us|get.in.touch/i` or hrefs containing `contact|about`
-4. Fetch the top 1–2 candidate contact pages
-5. Extract emails:
-   - **Pass 1 (regex):** `[\w.+-]+@[\w-]+\.[\w.-]+` over visible text + `mailto:` hrefs
-   - **Pass 2 (LLM fallback):** if regex finds 0 emails or only junk, send up to 8KB of cleaned page text to Haiku with prompt: *"Extract the primary public contact email for this company. Return JSON: `{email: string|null, confidence: 'high'|'medium'|'low', reason: string}`. Reject obfuscated, placeholder, or unrelated emails."*
-6. Filter junk:
-   - Block: `noreply@`, `no-reply@`, `donotreply@`, `privacy@`, `dpo@`, `abuse@`, `webmaster@`
-   - Block: emails on free providers (`@gmail.com`, `@yahoo.com`) — usually not a real corporate contact
-   - Prefer: `info@`, `contact@`, `sales@`, `hello@`, `enquiries@`
-7. If multiple valid emails: pick by preference order above.
+**Slug discovery:**
+- **Primary:** read `/company/{slug}/` from the logo `<img src=...>` on the listing card.
+- **Fallback (no logo):** ~75% of cards use a placeholder logo (`gfx17/supplier.gif`). For those, derive a slug heuristically from the company name (lowercase + accents stripped + non-alphanumerics replaced by hyphens).
+- **Fallback fallback:** if the heuristic slug 404s, fetch the event-scoped exhibitor page (the `/46/.../exhibitor*.html` URL we already grabbed from the listing) and extract the canonical slug from its "View company profile" link.
 
-**Cost expectation per run (1000 companies):**
-- ~70% caught by regex → 0 LLM calls
-- ~30% LLM fallback × ~5KB input × $1/MTok input = ~$1.50
-- Output negligible
-- **<$2 per run.**
+**Throttle:** 2s jittered between fresh profile fetches; cache hits skip the sleep.
+**Cache:** raw HTML written to `cache/profile/{slug}.html`. Re-runs reuse it unless `--no-cache` is passed.
+
+### 7.3 Email gap-fill (v0.3 — deferred)
+
+After Stage 7.2, ~75% of companies will already have an email from JSON-LD. For the remaining ~25% (where JSON-LD has phone/address but no email), v0.3 will:
+
+1. Try common URL patterns from the company name (e.g. `https://{slugified-name}.com`) and validate via HTTP HEAD
+2. If that fails, search DDG (free, no key) or Brave (free 2000/mo, needs key) for the company website
+3. Fetch the homepage, look for `mailto:` and `<a href*=contact>` links
+4. Regex-extract emails on the contact page
+5. LLM fallback (Claude Haiku) for messy/obfuscated cases
+
+Filter rules same as before: block `noreply@`, `privacy@`, `dpo@`, etc.; prefer `info@`/`contact@`/`sales@`/`hello@` over personal emails when JSON-LD didn't already give us a named one.
+
+**Cost expectation per 1000-company run:**
+- ~750 emails free from JSON-LD (Stage 7.2)
+- ~150 from website regex (Stage 7.3, free)
+- ~100 LLM fallback × $0.005 each = ~$0.50
+- **<$1 per run.** (down from <$2 in the original spec since JSON-LD eliminates most LLM calls)
 
 ### 7.4 Politeness rules (global)
 
@@ -281,17 +282,15 @@ Effectively free to operate.
 
 ## 11. Roadmap
 
-**v0.1 — Listing only.** Playwright scrapes CPHI listing, prints company names. No CSV yet. Validates that the listing scraper works.
+**v0.1 — Listing only.** ✅ Done. Playwright scrapes CPHI listing, extracts name + country + booth + detail URL. Validated against `cpww26/`.
 
-**v0.2 — Detail pages.** Adds website/country/booth extraction. Writes minimal CSV. Validates detail page access (the 403 issue).
+**v0.2 — Profile JSON-LD extraction + CSV.** ✅ Done. Heuristic-slug + 404-fallback resolution to `/company/{slug}/`, JSON-LD parse for email/phone/address, CSV writer with all tagging columns, HTML cache. Verified on 8 companies: 75% had named emails, 100% had phones.
 
-**v0.3 — Email finder, regex only.** Adds the company-website crawl. Most leads should have emails by this stage.
+**v0.3 — Email gap-fill.** Adds the company-website crawl for the ~25% of companies without a JSON-LD email. Regex first, Haiku as fallback for messy contact pages.
 
-**v0.4 — LLM fallback.** Wires in Haiku for hard cases.
+**v0.4 — GitHub Actions wrapper.** `workflow_dispatch` with the 5 inputs from §8, runs end-to-end on a fresh Ubuntu runner, emails CSV via Gmail SMTP, also uploads as artifact.
 
-**v0.5 — GitHub Actions wrapper.** Workflow, inputs, artifact upload. End-to-end runnable by the operator.
-
-**v1.0 — Polish.** README for operator, error handling pass, run summary, tests.
+**v1.0 — Polish.** Operator-facing README, error-handling pass, run summary in workflow + email body, smoke test asserting ≥50 cards extracted.
 
 **v2 (future):**
 - Email notification on workflow completion (Gmail SMTP step)
