@@ -1,0 +1,151 @@
+name: Scrape Exhibition
+
+on:
+  workflow_dispatch:
+    inputs:
+      exhibition_url:
+        description: 'Exhibitor listing URL (e.g. https://exhibitors.cphi.com/cpww26/)'
+        required: true
+        type: string
+      exhibition_name:
+        description: 'Exhibition name (e.g. CPHI Milan)'
+        required: true
+        type: string
+      exhibition_year:
+        description: 'Exhibition year (e.g. 2026)'
+        required: true
+        type: string
+        default: '2026'
+      industry:
+        description: 'Industry tag (e.g. Pharma)'
+        required: true
+        type: string
+        default: 'Pharma'
+      recipient_email:
+        description: 'Email address to send the CSV to when the run finishes'
+        required: true
+        type: string
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240   # generous; a 2k-exhibitor run is ~2h
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install Python deps
+        run: |
+          pip install --upgrade pip
+          pip install playwright
+
+      - name: Cache Playwright browsers
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('pyproject.toml') }}
+
+      - name: Install Playwright chromium
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: python -m playwright install --with-deps chromium
+
+      - name: Install Playwright system deps (cached browser path)
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        run: python -m playwright install-deps chromium
+
+      - name: Run scraper
+        env:
+          PYTHONUNBUFFERED: '1'
+        run: |
+          python -m scraper.run \
+            --url "${{ inputs.exhibition_url }}" \
+            --exhibition-name "${{ inputs.exhibition_name }}" \
+            --exhibition-year "${{ inputs.exhibition_year }}" \
+            --industry "${{ inputs.industry }}"
+
+      - name: Compute run summary
+        id: summary
+        if: success()
+        shell: bash
+        run: |
+          csv_path=$(ls output/*.csv | head -1)
+          echo "csv_path=$csv_path" >> "$GITHUB_OUTPUT"
+          CSV_PATH="$csv_path" python - <<'PY' >> "$GITHUB_OUTPUT"
+          import csv as csvmod
+          import os
+          with open(os.environ["CSV_PATH"], encoding="utf-8") as f:
+              rows = list(csvmod.DictReader(f))
+          n = len(rows)
+          e = sum(1 for r in rows if r["company_email"])
+          p = sum(1 for r in rows if r["company_phone"])
+          fails = sum(1 for r in rows if "fetch failed" in (r["notes"] or ""))
+          print(f"rows={n}")
+          print(f"emails={e}")
+          print(f"phones={p}")
+          print(f"fails={fails}")
+          pct = lambda x: 100 * x // n if n else 0
+          print(f"emails_pct={pct(e)}")
+          print(f"phones_pct={pct(p)}")
+          PY
+
+      - name: Upload CSV as artifact
+        if: always() && hashFiles('output/*.csv') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: leads-csv
+          path: output/*.csv
+          retention-days: 30
+
+      - name: Email CSV (success)
+        if: success()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          secure: true
+          username: ${{ secrets.GMAIL_USER }}
+          password: ${{ secrets.GMAIL_APP_PASSWORD }}
+          from: 'Exhibition Lead Scraper <${{ secrets.GMAIL_USER }}>'
+          to: ${{ inputs.recipient_email }}
+          subject: "Leads: ${{ inputs.exhibition_name }} ${{ inputs.exhibition_year }} (${{ steps.summary.outputs.rows }} companies)"
+          body: |
+            Your scrape of ${{ inputs.exhibition_name }} ${{ inputs.exhibition_year }} (${{ inputs.industry }}) is complete.
+
+            Summary
+              Total companies:  ${{ steps.summary.outputs.rows }}
+              With email:       ${{ steps.summary.outputs.emails }} (${{ steps.summary.outputs.emails_pct }}%)
+              With phone:       ${{ steps.summary.outputs.phones }} (${{ steps.summary.outputs.phones_pct }}%)
+              Fetch failures:   ${{ steps.summary.outputs.fails }}
+
+            The CSV is attached to this email. It is also available as a workflow artifact
+            for 30 days:
+            https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            Source: ${{ inputs.exhibition_url }}
+          attachments: ${{ steps.summary.outputs.csv_path }}
+
+      - name: Email failure
+        if: failure()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          secure: true
+          username: ${{ secrets.GMAIL_USER }}
+          password: ${{ secrets.GMAIL_APP_PASSWORD }}
+          from: 'Exhibition Lead Scraper <${{ secrets.GMAIL_USER }}>'
+          to: ${{ inputs.recipient_email }}
+          subject: "Scrape FAILED: ${{ inputs.exhibition_name }} ${{ inputs.exhibition_year }}"
+          body: |
+            The scrape of ${{ inputs.exhibition_url }} failed before producing a CSV.
+
+            See the workflow run for logs:
+            https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
