@@ -29,7 +29,7 @@ on:
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 240   # generous; a 2k-exhibitor run is ~2h
+    timeout-minutes: 360   # Electronica's ~3500 exhibitors + gap-fill runs ~5-6h
 
     steps:
       - name: Checkout
