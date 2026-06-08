@@ -8,9 +8,11 @@ from __future__ import annotations
 
 from scraper.core.types import Scraper
 from scraper.sites.cphi import CphiScraper
+from scraper.sites.electronica import ElectronicaScraper
 
 SCRAPERS: list[type[Scraper]] = [
     CphiScraper,
+    ElectronicaScraper,
 ]
 
 
