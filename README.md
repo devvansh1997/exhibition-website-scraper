@@ -1,13 +1,26 @@
 # Exhibition Website Scraper
 
 Pulls a lead list (company name + email + phone + address + country + booth)
-from a CPHI-style exhibition site and emails it back to you as a CSV.
+from an exhibition site and emails it back to you as a CSV.
 
 Built for an exhibition-stall business that needs to reach the companies
 attending a given show. One scrape = one CSV = one email blast worth of leads.
 
-Currently supports **CPHI** (`exhibitors.cphi.com/*`). Other platforms can
-be added later.
+## Supported sites
+
+The scraper auto-detects which site you've given it from the URL prefix.
+
+| Site | Example URL | Typical email rate |
+|---|---|---|
+| **CPHI** (pharma) | `https://exhibitors.cphi.com/cpww26/` | ~73% (named contacts) |
+| **FI Global** (food ingredients) | `https://exhibitors.figlobal.com/live/figlobal/event46.jsp?site=47&type=company&eventid=629&map=false` | ~85% |
+| **EuroTier** (agriculture) | `https://digital.eurotier.com/newfront/marketplace/exhibitors?pageNumber=1&limit=60` | ~100% |
+| **Electronica** (electronics) | `https://exhibitors.electronica.de/exhibitor-portal/2026/` | ~20% (most contacts login-gated) |
+| **Space Tech Expo Europe** | `https://www.spacetechexpo-europe.com/exhibitor-list/` | 0% (platform doesn't expose emails — website + address only) |
+
+Coverage varies because each platform exposes different fields. A site that
+hides contacts behind a login wall (like Electronica) yields lower email rates;
+a site that publishes them publicly (like CPHI / EuroTier) yields high rates.
 
 ---
 

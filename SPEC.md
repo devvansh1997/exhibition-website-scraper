@@ -8,20 +8,24 @@ Lead-generation scraper for an exhibition stall business. Given an exhibition's 
 
 **Goal:** Non-technical user (the business owner) pastes an exhibition URL into a GitHub Actions form and 30–60 minutes later receives a CSV of leads.
 
-**In scope (v1):**
-- One source platform: CPHI / `cphi-online.com` exhibitor lists (e.g. `https://exhibitors.cphi.com/cpww26/`)
-- Output: per-run CSV with company name, website, country, generic contact email, and exhibition-tagging columns
-- Polite scraping (rate-limited, normal browser UA, no proxies)
-- Trigger: GitHub Actions `workflow_dispatch` with URL + metadata inputs
-- Artifact: CSV uploaded to the workflow run; downloadable from GitHub UI
+**In scope (current):**
+- Five source platforms, auto-detected from URL prefix:
+  - **CPHI** (`exhibitors.cphi.com`) — Informa, JSON-LD on slug-based profile pages
+  - **FI Global** (`exhibitors.figlobal.com`) — Informa, DOM-scraped event-scoped pages
+  - **EuroTier** (`digital.eurotier.com`) — ExpoPlatform white-label, React app
+  - **Electronica** (`exhibitors.electronica.de`) — ColdFusion, AJAX pagination
+  - **Space Tech Expo Europe** (`spacetechexpo-europe.com`) — Salesforce Experience Cloud
+- Output: per-run CSV with company name, website, country, email/phone (where exposed), address, booth, and exhibition-tagging columns
+- Polite scraping (2s jittered throttle, normal browser UA, no proxies)
+- Trigger: GitHub Actions `workflow_dispatch` with URL + metadata + recipient_email inputs
+- Delivery: CSV emailed via Gmail SMTP + uploaded as workflow artifact
 
-**Explicitly out of scope (v1):**
-- Generalization across arbitrary exhibition platforms — start narrow, expand later
-- Named decision-maker contacts (sales director, etc.) — would require Apollo/Hunter/LinkedIn
-- Phone numbers, postal addresses — only email
+**Explicitly out of scope:**
 - Notion-driven trigger — planned for v2
 - Persistent DB — CSVs only, downstream merging handled in pandas/Excel
+- Email gap-fill (visiting the company's own website for sites that don't expose emails) — planned for v0.3
 - Email validation via SMTP probing — only regex/format validation
+- Apollo/Hunter/LinkedIn-style enrichment for named decision-makers (we get named contacts for free on platforms that expose JSON-LD / mailto, e.g. CPHI's ~73%; otherwise rely on what each site publishes)
 
 ---
 
@@ -288,7 +292,18 @@ Effectively free to operate.
 
 **v0.3 — Email gap-fill.** Adds the company-website crawl for the ~25% of companies without a JSON-LD email. Regex first, Haiku as fallback for messy contact pages.
 
-**v0.4 — GitHub Actions wrapper.** `workflow_dispatch` with the 5 inputs from §8, runs end-to-end on a fresh Ubuntu runner, emails CSV via Gmail SMTP, also uploads as artifact.
+**v0.4 — GitHub Actions wrapper.** ✅ Done. `workflow_dispatch` with the 5 inputs from §8, runs end-to-end on a fresh Ubuntu runner, emails CSV via Gmail SMTP, also uploads as artifact.
+
+**v0.5 — Multi-site generalization.** ✅ Done. Refactored to `core/` (shared) + `sites/<id>.py` (per-platform Scraper subclasses) + `registry.py` (URL → scraper picker). Added Electronica, FI Global, EuroTier, Space Tech Expo Europe scrapers. Workflow auto-detects which scraper to use from the URL — no UI change for the operator.
+
+Per-site sampled coverage:
+| Site | Email | Phone | Address | Notes |
+|---|---|---|---|---|
+| CPHI | 73% | 96% | ✅ | JSON-LD on /company/{slug}/, named contacts |
+| FI Global | 87% | — | — | DOM-scraped, named contacts, no phone exposed |
+| EuroTier | 100% | 60% | ✅ | React app, content-polling required |
+| Electronica | 20% | 20% | ✅ | Most exhibitors gate contacts behind login |
+| SpaceTechExpo | 0% | 0% | ✅ | Platform exposes website + address only |
 
 **v1.0 — Polish.** Operator-facing README, error-handling pass, run summary in workflow + email body, smoke test asserting ≥50 cards extracted.
 
