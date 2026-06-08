@@ -296,14 +296,16 @@ Effectively free to operate.
 
 **v0.5 — Multi-site generalization.** ✅ Done. Refactored to `core/` (shared) + `sites/<id>.py` (per-platform Scraper subclasses) + `registry.py` (URL → scraper picker). Added Electronica, FI Global, EuroTier, Space Tech Expo Europe scrapers. Workflow auto-detects which scraper to use from the URL — no UI change for the operator.
 
-Per-site sampled coverage:
+**v0.6 — Email gap-fill via company website.** ✅ Done. Post-scrape phase: for any lead with empty `company_email` but non-empty `company_website`, hit the company's own site (homepage + `/contact`, `/impressum`, etc.), regex emails out of body text, score them (same-domain wins, preferred generic prefixes like `info@`/`contact@` boosted, form placeholders + `noreply@` etc. filtered), pick the best. Cached per-domain so a repeat company across shows is a free hit. `--no-gap-fill` flag bypasses the pass for speed-first runs.
+
+Per-site sampled coverage (after v0.6 gap-fill):
 | Site | Email | Phone | Address | Notes |
 |---|---|---|---|---|
 | CPHI | 73% | 96% | ✅ | JSON-LD on /company/{slug}/, named contacts |
-| FI Global | 87% | — | — | DOM-scraped, named contacts, no phone exposed |
 | EuroTier | 100% | 60% | ✅ | React app, content-polling required |
-| Electronica | 20% | 20% | ✅ | Most exhibitors gate contacts behind login |
-| SpaceTechExpo | 0% | 0% | ✅ | Platform exposes website + address only |
+| FI Global | 87% | — | — | DOM-scraped, named contacts, no phone exposed |
+| Electronica | 20% → **65%** | 20% | ✅ | Gap-fill recovered ~12/19 of platform-gated cases |
+| SpaceTechExpo | 0% → **91%** | 0% | ✅ | Gap-fill turned a website-only platform into a usable lead source |
 
 **v1.0 — Polish.** Operator-facing README, error-handling pass, run summary in workflow + email body, smoke test asserting ≥50 cards extracted.
 

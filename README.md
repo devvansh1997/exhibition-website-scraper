@@ -15,12 +15,15 @@ The scraper auto-detects which site you've given it from the URL prefix.
 | **CPHI** (pharma) | `https://exhibitors.cphi.com/cpww26/` | ~73% (named contacts) |
 | **FI Global** (food ingredients) | `https://exhibitors.figlobal.com/live/figlobal/event46.jsp?site=47&type=company&eventid=629&map=false` | ~85% |
 | **EuroTier** (agriculture) | `https://digital.eurotier.com/newfront/marketplace/exhibitors?pageNumber=1&limit=60` | ~100% |
-| **Electronica** (electronics) | `https://exhibitors.electronica.de/exhibitor-portal/2026/` | ~20% (most contacts login-gated) |
-| **Space Tech Expo Europe** | `https://www.spacetechexpo-europe.com/exhibitor-list/` | 0% (platform doesn't expose emails — website + address only) |
+| **Electronica** (electronics) | `https://exhibitors.electronica.de/exhibitor-portal/2026/` | ~65% (gap-filled from company websites) |
+| **Space Tech Expo Europe** | `https://www.spacetechexpo-europe.com/exhibitor-list/` | ~91% (gap-filled from company websites) |
 
-Coverage varies because each platform exposes different fields. A site that
-hides contacts behind a login wall (like Electronica) yields lower email rates;
-a site that publishes them publicly (like CPHI / EuroTier) yields high rates.
+Coverage varies because each platform exposes different fields. For sites that
+don't publish exhibitor emails directly (Electronica, Space Tech Expo), a
+post-scrape **gap-fill pass** visits each company's own website and extracts
+the contact email from there — recovering most leads the platform doesn't expose.
+Pass `--no-gap-fill` (or skip it in the workflow if you add a checkbox) to
+disable for faster runs.
 
 ---
 
