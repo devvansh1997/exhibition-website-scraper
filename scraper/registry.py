@@ -9,11 +9,13 @@ from __future__ import annotations
 from scraper.core.types import Scraper
 from scraper.sites.cphi import CphiScraper
 from scraper.sites.electronica import ElectronicaScraper
+from scraper.sites.figlobal import FiGlobalScraper
 from scraper.sites.spacetechexpo import SpaceTechExpoScraper
 
 SCRAPERS: list[type[Scraper]] = [
     CphiScraper,
     ElectronicaScraper,
+    FiGlobalScraper,
     SpaceTechExpoScraper,
 ]
 
