@@ -69,20 +69,48 @@ def _extract_slug(url: str) -> str:
 
 def _extract_listings(page: Page) -> list[_Listing]:
     """Pull (name, detail_url, slug) tuples from anchors on the current
-    listing page. Dedup by detail-URL slug."""
+    listing page. Dedup by detail-URL slug.
+
+    Implemented as a single `eval_on_selector_all` call so the snapshot
+    is atomic — pagination here is AJAX and the DOM is repeatedly
+    replaced. Per-element Locator.get_attribute() round-trips would
+    time out (Playwright's 30s default) when an anchor disappears mid-
+    iteration.
+    """
+    try:
+        raw = page.eval_on_selector_all(
+            DETAIL_LINK_SELECTOR,
+            "els => els.map(e => ({h: e.href || e.getAttribute('href') || '', t: (e.innerText||'').trim()}))",
+        )
+    except Exception:
+        return []
     out: list[_Listing] = []
     seen: set[str] = set()
-    for a in page.locator(DETAIL_LINK_SELECTOR).all():
-        href = a.get_attribute("href") or ""
+    for item in raw:
+        href = item.get("h") or ""
         slug = _extract_slug(href)
         if not slug or slug in seen:
             continue
-        text = (a.inner_text() or "").strip()
+        text = item.get("t") or ""
         if not text:
             continue
         seen.add(slug)
         out.append(_Listing(name=text, detail_url=href, slug=slug))
     return out
+
+
+def _first_slug(page: Page) -> str:
+    """Cheap one-round-trip read of the first detail anchor's slug.
+    Used in the AJAX wait loop instead of full extraction."""
+    try:
+        href = page.eval_on_selector(
+            DETAIL_LINK_SELECTOR,
+            "e => e.href || e.getAttribute('href') || ''",
+        )
+    except Exception:
+        return ""
+    m = SLUG_FROM_DETAIL_PATTERN.search(href or "")
+    return m.group(1) if m else ""
 
 
 def _dismiss_cookie_banner(page: Page) -> None:
@@ -157,14 +185,15 @@ def _walk_listing(
             break
 
         # Pagination is AJAX (the onclick swaps #jl_contentArea via JS).
-        # Wait until the FIRST visible card's slug actually changes,
-        # rather than for a selector that's already present.
+        # Wait until the FIRST visible card's slug actually changes.
+        # Use the cheap atomic _first_slug check so we don't trigger
+        # per-anchor timeouts while the DOM is mid-swap.
         content_changed = False
         deadline = time.monotonic() + 20.0
         while time.monotonic() < deadline:
             time.sleep(0.4)
-            new = _extract_listings(page)
-            if new and (not first_slug_before or new[0].slug != first_slug_before):
+            first_now = _first_slug(page)
+            if first_now and first_now != first_slug_before:
                 content_changed = True
                 break
         if not content_changed:
