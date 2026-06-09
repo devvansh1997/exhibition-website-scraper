@@ -39,11 +39,21 @@ SKIP_HOSTS = {
     # Show + parent infra
     "spacetechexpo-europe.com",
     "spacetechexpo.com",  # US sister show
-    "foam-expo.com",  # sister show
     "smartershows.com",  # parent organiser
     "mapyourshow.com",  # floor-plan tool linked from every detail
     "visitcloud.com",  # registration tool linked from every detail
     "register.visitcloud.com",
+    "translate.google.com",
+    # Sister shows in the Smarter Shows family — all linked from every
+    # detail page's footer. The real company URL appears further down
+    # the link list, so each one of these has to be skipped explicitly.
+    "foam-expo.com",
+    "foam-expo-europe.com",
+    "ceramicsexpousa.com",
+    "adhesivesandbondingexpo.com",
+    "adhesivesandbondingexpo-mexico.com",
+    "adhesivesandbondingexpo-europe.com",
+    "thermalmanagementexpo.com",
     # Social / search
     "linkedin.com",
     "twitter.com",
@@ -54,13 +64,20 @@ SKIP_HOSTS = {
     "google.com",
 }
 
-# Skip these email domains entirely — they are the show's own contacts,
-# not the exhibitor's. STE renders only the global show email on every
-# detail page (no per-exhibitor email is exposed).
+# Skip these email domains entirely — they are the show family's own
+# contacts, never the exhibitor's. STE / its sister shows render their
+# global emails on every detail page (no per-exhibitor email is exposed).
 SKIP_EMAIL_DOMAINS = {
     "spacetechexpo-europe.com",
     "spacetechexpo.com",
     "smartershows.com",
+    "foam-expo.com",
+    "foam-expo-europe.com",
+    "ceramicsexpousa.com",
+    "adhesivesandbondingexpo.com",
+    "adhesivesandbondingexpo-mexico.com",
+    "adhesivesandbondingexpo-europe.com",
+    "thermalmanagementexpo.com",
     "example.com",  # template placeholder seen on every page
 }
 
@@ -210,6 +227,26 @@ def _parse_detail(page: Page, listing: _Listing) -> Lead:
     )
 
 
+import time as _time
+
+
+def _wait_for_company_content(page: Page, timeout_s: float = 12.0) -> None:
+    """STE detail pages are React-rendered. domcontentloaded fires
+    before the company-specific block (booth, address, the actual
+    company website link) is in the DOM — leaving us with just the
+    page shell that has sister-show URLs in the footer. Poll body
+    text for markers that the company content has rendered."""
+    deadline = _time.monotonic() + timeout_s
+    while _time.monotonic() < deadline:
+        try:
+            body = page.locator("body").inner_text()
+        except Exception:
+            body = ""
+        if "Booth number" in body or "Categories:" in body or "Back to Exhibitor List" in body:
+            return
+        _time.sleep(0.3)
+
+
 def _fetch_detail_html(
     context: BrowserContext, url: str, *, referer: str | None
 ) -> str | None:
@@ -218,7 +255,7 @@ def _fetch_detail_html(
         r = page.goto(url, wait_until="domcontentloaded", timeout=45_000, referer=referer)
         if r is None or r.status >= 400:
             return None
-        page.wait_for_timeout(500)
+        _wait_for_company_content(page)
         return page.content()
     except PlaywrightTimeoutError:
         return None
