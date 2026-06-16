@@ -73,7 +73,7 @@ jobs:
 
       - name: Compute run summary
         id: summary
-        if: success()
+        if: always() && hashFiles('output/*.csv') != ''
         shell: bash
         run: |
           csv_path=$(ls output/*.csv | head -1)
@@ -104,8 +104,12 @@ jobs:
           path: output/*.csv
           retention-days: 30
 
-      - name: Email CSV (success)
-        if: success()
+      # Email the CSV whenever ANY rows were written — even if the
+      # scraper was cancelled by the 6h GH Actions cap. run.py snapshots
+      # the CSV every 25 rows, so a cancelled run still hands back the
+      # most recent partial CSV.
+      - name: Email CSV
+        if: always() && hashFiles('output/*.csv') != ''
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: smtp.gmail.com
@@ -115,9 +119,14 @@ jobs:
           password: ${{ secrets.GMAIL_APP_PASSWORD }}
           from: 'Exhibition Lead Scraper <${{ secrets.GMAIL_USER }}>'
           to: ${{ inputs.recipient_email }}
-          subject: "Leads: ${{ inputs.exhibition_name }} ${{ inputs.exhibition_year }} (${{ steps.summary.outputs.rows }} companies)"
+          subject: >-
+            ${{ steps.scrape.outcome == 'success'
+                && format('Leads: {0} {1} ({2} companies)', inputs.exhibition_name, inputs.exhibition_year, steps.summary.outputs.rows)
+                || format('Leads (PARTIAL): {0} {1} ({2} companies so far)', inputs.exhibition_name, inputs.exhibition_year, steps.summary.outputs.rows) }}
           body: |
-            Your scrape of ${{ inputs.exhibition_name }} ${{ inputs.exhibition_year }} (${{ inputs.industry }}) is complete.
+            ${{ steps.scrape.outcome == 'success' && 'Your scrape is complete.' || format('Your scrape was {0} before it could finish. The attached CSV is partial — it contains every lead we managed to process before the run stopped (run.py snapshots the CSV every 25 rows).', steps.scrape.outcome) }}
+
+            Exhibition: ${{ inputs.exhibition_name }} ${{ inputs.exhibition_year }} (${{ inputs.industry }})
 
             Summary
               Total companies:  ${{ steps.summary.outputs.rows }}
@@ -125,15 +134,18 @@ jobs:
               With phone:       ${{ steps.summary.outputs.phones }} (${{ steps.summary.outputs.phones_pct }}%)
               Fetch failures:   ${{ steps.summary.outputs.fails }}
 
-            The CSV is attached to this email. It is also available as a workflow artifact
+            The CSV is attached. It is also available as a workflow artifact
             for 30 days:
             https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
             Source: ${{ inputs.exhibition_url }}
           attachments: ${{ steps.summary.outputs.csv_path }}
 
-      - name: Email failure
-        if: failure()
+      # Fires only when no CSV was produced at all — i.e. the scraper
+      # crashed before the first snapshot. If even one snapshot landed,
+      # the "Email CSV" step above sends it instead.
+      - name: Email failure (no CSV produced)
+        if: always() && hashFiles('output/*.csv') == '' && (steps.scrape.outcome == 'failure' || steps.scrape.outcome == 'cancelled')
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: smtp.gmail.com
@@ -145,7 +157,7 @@ jobs:
           to: ${{ inputs.recipient_email }}
           subject: "Scrape FAILED: ${{ inputs.exhibition_name }} ${{ inputs.exhibition_year }}"
           body: |
-            The scrape of ${{ inputs.exhibition_url }} failed before producing a CSV.
+            The scrape of ${{ inputs.exhibition_url }} failed before producing any rows.
 
             See the workflow run for logs:
             https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}

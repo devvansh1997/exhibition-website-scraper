@@ -73,6 +73,15 @@ def main() -> int:
     output_dir = Path(args.output_dir)
     cache_dir = None if args.no_cache else Path(args.cache_dir)
 
+    out = output_path(meta, output_dir)
+    SNAPSHOT_EVERY = 25
+
+    def snapshot(leads: list[Lead]) -> None:
+        """Atomic CSV rewrite. Cheap (write to .tmp + os.replace) and
+        idempotent, so we call it liberally — if the run is killed by
+        GH Actions' 6h cap, the last snapshot still gets emailed."""
+        write_csv([lead_to_row(l, meta) for l in leads], out)
+
     # Phase 1: scrape the platform into Leads.
     leads: list[Lead] = []
     for lead in scraper.scrape(
@@ -83,6 +92,9 @@ def main() -> int:
         progress=print,
     ):
         leads.append(lead)
+        if len(leads) % SNAPSHOT_EVERY == 0:
+            snapshot(leads)
+    snapshot(leads)  # final snapshot after phase 1
 
     # Phase 2: for leads with no email but a known website, hit the
     # company's own site and try to find one. Skipped with --no-gap-fill.
@@ -127,11 +139,12 @@ def main() -> int:
                     f"{lead.company_name!r} -> {email or '-'}"
                     + (f"  ERR: {err}" if err else "")
                 )
+                if done % SNAPSHOT_EVERY == 0:
+                    snapshot(leads)
 
-    # Phase 3: write CSV + summary.
+    # Phase 3: final snapshot + summary.
+    snapshot(leads)
     rows = [lead_to_row(l, meta) for l in leads]
-    out = output_path(meta, output_dir)
-    write_csv(rows, out)
 
     total = len(rows)
     with_email = sum(1 for l in leads if l.company_email)

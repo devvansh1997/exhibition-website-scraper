@@ -69,9 +69,18 @@ def lead_to_row(lead: Lead, meta: RunMetadata) -> dict[str, str]:
 
 
 def write_csv(rows: list[dict], path: Path) -> None:
+    """Atomic CSV write: write to a sibling .tmp file, then os.replace.
+
+    If the process is killed mid-write, the previous CSV (if any) is
+    untouched and the .tmp file is just discarded.  Lets run.py
+    snapshot the CSV repeatedly during a long run so a GH Actions
+    cancellation still hands back whatever rows we had so far.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8", newline="") as f:
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with tmp.open("w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS, extrasaction="ignore")
         writer.writeheader()
         for row in rows:
             writer.writerow(row)
+    tmp.replace(path)
