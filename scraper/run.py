@@ -16,12 +16,9 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from playwright.sync_api import sync_playwright
-
 from scraper.core.csv_writer import lead_to_row, output_path, write_csv
-from scraper.core.politeness import USER_AGENT, jittered_sleep
 from scraper.core.types import Lead, RunMetadata
-from scraper.core.website_email import find_email_for_website
+from scraper.core.website_email import gap_fill_concurrent
 from scraper.registry import pick_scraper
 
 
@@ -50,6 +47,13 @@ def main() -> int:
         help="Skip the post-scrape pass that hits each company's own website "
              "to recover an email. Faster, but lower coverage on sites that "
              "don't publish exhibitor emails (e.g. Space Tech Expo).",
+    )
+    parser.add_argument(
+        "--gap-fill-workers",
+        type=int,
+        default=8,
+        help="Number of concurrent worker threads for the website gap-fill "
+             "pass (default 8). Each worker owns its own browser context.",
     )
     parser.add_argument("--output-dir", default="output")
     parser.add_argument("--cache-dir", default="cache")
@@ -82,6 +86,8 @@ def main() -> int:
 
     # Phase 2: for leads with no email but a known website, hit the
     # company's own site and try to find one. Skipped with --no-gap-fill.
+    # Runs concurrently across `--gap-fill-workers` threads since each
+    # company website is on a different domain.
     gap_filled = 0
     gap_attempted = 0
     if not args.no_gap_fill:
@@ -91,41 +97,36 @@ def main() -> int:
             if not l.company_email and l.company_website
         ]
         if candidates:
-            print(f"\n[gapfill] {len(candidates)} leads need email — visiting their websites")
-            with sync_playwright() as p:
-                browser = p.chromium.launch(headless=True)
-                context = browser.new_context(user_agent=USER_AGENT)
-                try:
-                    for idx, (i, lead) in enumerate(candidates, 1):
-                        gap_attempted += 1
-                        print(
-                            f"[gapfill] {idx:>4}/{len(candidates)}: "
-                            f"{lead.company_name!r} -> {lead.company_website}"
-                        )
-                        try:
-                            email = find_email_for_website(
-                                context,
-                                lead.company_website,
-                                cache_dir=cache_dir,
-                                progress=print,
-                            )
-                        except Exception as e:
-                            print(f"  [gapfill] error: {e!r}")
-                            email = ""
-                        if email:
-                            leads[i] = dataclasses.replace(
-                                lead,
-                                company_email=email,
-                                email_source="company_website",
-                                email_confidence="medium",
-                            )
-                            gap_filled += 1
-                        # Politeness across DIFFERENT external domains —
-                        # gentler than within-site throttle since each
-                        # company sees only one of our requests.
-                        jittered_sleep(base=1.0, jitter=0.5)
-                finally:
-                    browser.close()
+            n_workers = max(1, args.gap_fill_workers)
+            print(
+                f"\n[gapfill] {len(candidates)} leads need email — "
+                f"visiting their websites concurrently ({n_workers} workers)"
+            )
+            items = [(i, lead.company_website) for i, lead in candidates]
+            idx_to_lead = {i: lead for i, lead in candidates}
+            done = 0
+            for orig_idx, email, err in gap_fill_concurrent(
+                items,
+                n_workers=n_workers,
+                cache_dir=cache_dir,
+                progress=lambda _s: None,  # per-fetch detail too noisy concurrently
+            ):
+                done += 1
+                gap_attempted += 1
+                lead = idx_to_lead[orig_idx]
+                if email:
+                    leads[orig_idx] = dataclasses.replace(
+                        lead,
+                        company_email=email,
+                        email_source="company_website",
+                        email_confidence="medium",
+                    )
+                    gap_filled += 1
+                print(
+                    f"[gapfill] {done:>4}/{len(candidates)}: "
+                    f"{lead.company_name!r} -> {email or '-'}"
+                    + (f"  ERR: {err}" if err else "")
+                )
 
     # Phase 3: write CSV + summary.
     rows = [lead_to_row(l, meta) for l in leads]

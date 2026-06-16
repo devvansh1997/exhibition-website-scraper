@@ -230,21 +230,25 @@ def _parse_detail(page: Page, listing: _Listing) -> Lead:
 import time as _time
 
 
-def _wait_for_company_content(page: Page, timeout_s: float = 12.0) -> None:
+def _wait_for_company_content(page: Page, timeout_s: float = 5.0) -> None:
     """STE detail pages are React-rendered. domcontentloaded fires
     before the company-specific block (booth, address, the actual
     company website link) is in the DOM — leaving us with just the
     page shell that has sister-show URLs in the footer. Poll body
-    text for markers that the company content has rendered."""
+    text for markers that the company content has rendered.
+
+    'Back to Exhibitor List' was removed as a marker — it sits in the
+    header and appears BEFORE the company block hydrates, so it
+    short-circuited the wait early on the first live run."""
     deadline = _time.monotonic() + timeout_s
     while _time.monotonic() < deadline:
         try:
             body = page.locator("body").inner_text()
         except Exception:
             body = ""
-        if "Booth number" in body or "Categories:" in body or "Back to Exhibitor List" in body:
+        if "Booth number" in body or "Categories:" in body:
             return
-        _time.sleep(0.3)
+        _time.sleep(0.25)
 
 
 def _fetch_detail_html(

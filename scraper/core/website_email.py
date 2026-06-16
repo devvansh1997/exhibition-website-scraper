@@ -14,14 +14,21 @@ attending multiple shows is only fetched once.
 
 from __future__ import annotations
 
+import queue
 import re
+import threading
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterable, Iterator
 from urllib.parse import urlparse
 
-from playwright.sync_api import BrowserContext, TimeoutError as PlaywrightTimeoutError
+from playwright.sync_api import (
+    BrowserContext,
+    TimeoutError as PlaywrightTimeoutError,
+    sync_playwright,
+)
 
 from scraper.core.cache import cache_path, load_cached, store_cached
+from scraper.core.politeness import USER_AGENT
 
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
 
@@ -238,3 +245,119 @@ def find_email_for_website(
     if cf is not None:
         store_cached(cf, found)
     return found
+
+
+# ---------------------------------------------------------------------------
+# Concurrent gap-fill
+# ---------------------------------------------------------------------------
+#
+# Each company website is on a different domain, so there's no per-domain
+# rate-limiting concern from running many fetches in parallel — they go to
+# different servers.
+#
+# We spin up N worker threads. Each owns its own Playwright + browser +
+# context for its entire lifetime (Playwright's sync API isn't thread-safe
+# across threads, so each thread needs its own instance). Tasks come via a
+# queue; results go out via another. STOP sentinels terminate workers
+# cleanly so their browsers shut down properly.
+
+_STOP = object()
+
+
+def _gap_fill_worker(
+    task_q: "queue.Queue",
+    result_q: "queue.Queue",
+    cache_dir: Path | None,
+    progress: Callable[[str], None],
+) -> None:
+    try:
+        pw = sync_playwright().start()
+    except Exception as e:
+        # If we can't even start Playwright, surface it via the result queue
+        # so the main thread doesn't deadlock waiting forever.
+        while True:
+            task = task_q.get()
+            if task is _STOP:
+                return
+            idx, _url = task
+            result_q.put((idx, "", f"worker init failed: {e!r}"))
+        return
+    try:
+        browser = pw.chromium.launch(headless=True)
+        ctx = browser.new_context(user_agent=USER_AGENT)
+    except Exception as e:
+        try:
+            pw.stop()
+        except Exception:
+            pass
+        while True:
+            task = task_q.get()
+            if task is _STOP:
+                return
+            idx, _url = task
+            result_q.put((idx, "", f"worker init failed: {e!r}"))
+        return
+
+    try:
+        while True:
+            task = task_q.get()
+            if task is _STOP:
+                return
+            idx, website_url = task
+            try:
+                email = find_email_for_website(
+                    ctx, website_url, cache_dir=cache_dir, progress=progress
+                )
+                err = ""
+            except Exception as e:
+                email = ""
+                err = repr(e)
+            result_q.put((idx, email, err))
+    finally:
+        try:
+            browser.close()
+        except Exception:
+            pass
+        try:
+            pw.stop()
+        except Exception:
+            pass
+
+
+def gap_fill_concurrent(
+    items: Iterable[tuple[int, str]],
+    *,
+    n_workers: int = 8,
+    cache_dir: Path | None = None,
+    progress: Callable[[str], None] = lambda _s: None,
+) -> Iterator[tuple[int, str, str]]:
+    """Run gap-fill across `n_workers` threads. Yields (idx, email, err)
+    in completion order (not input order)."""
+    item_list = list(items)
+    if not item_list:
+        return
+    n_workers = max(1, min(n_workers, len(item_list)))
+
+    task_q: queue.Queue = queue.Queue()
+    result_q: queue.Queue = queue.Queue()
+
+    workers = []
+    for _ in range(n_workers):
+        t = threading.Thread(
+            target=_gap_fill_worker,
+            args=(task_q, result_q, cache_dir, progress),
+            daemon=True,
+        )
+        t.start()
+        workers.append(t)
+
+    try:
+        for item in item_list:
+            task_q.put(item)
+        for _ in range(len(item_list)):
+            yield result_q.get()
+    finally:
+        for _ in workers:
+            task_q.put(_STOP)
+        for t in workers:
+            t.join(timeout=15)
