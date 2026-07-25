@@ -14,12 +14,14 @@ attending multiple shows is only fetched once.
 
 from __future__ import annotations
 
+import json
 import queue
 import re
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable, Iterator
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from playwright.sync_api import (
     BrowserContext,
@@ -31,6 +33,19 @@ from scraper.core.cache import cache_path, load_cached, store_cached
 from scraper.core.politeness import USER_AGENT
 
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+
+# Phone extraction. We prefer intentional `tel:` links, then fall back to
+# numbers that sit next to an explicit phone label. We deliberately do NOT
+# scrape bare numbers — on a company website those are mostly VAT / reg /
+# postcode / date noise, and a wrong phone is worse than a blank one for a
+# client who's going to dial it.
+TEL_HREF_RE = re.compile(r'href=["\']tel:([^"\']+)["\']', re.IGNORECASE)
+PHONE_LABEL_RE = re.compile(
+    r"(?:tel\.?|t\.?e\.?l|tél\.?|phone|telephone|telefon|téléphone"
+    r"|fon|call\s+us|ph\.?)\s*[:.]?\s*"
+    r"(\+?[0-9][0-9\s()./\-]{6,}[0-9])",
+    re.IGNORECASE,
+)
 
 # Contact-page paths to try if homepage doesn't surface an email.
 CONTACT_PATHS = [
@@ -190,35 +205,73 @@ def _pick_best(emails: list[str], target_domain: str) -> str:
     return max(emails, key=lambda em: _score_email(em, target_domain))
 
 
-def find_email_for_website(
+@dataclass(frozen=True)
+class WebsiteContact:
+    email: str = ""
+    phone: str = ""
+
+
+def _clean_phone(raw: str) -> str:
+    """Light normalization only — collapse whitespace, fix the leading
+    double-plus, trim trailing separators. Not full E.164 (that's a
+    separate normalization pass); just make it dial-able and consistent."""
+    s = re.sub(r"\s+", " ", raw.strip())
+    s = re.sub(r"^\++", "+", s)  # "++45 ..." -> "+45 ..."
+    s = s.strip(" .-/")
+    return s
+
+
+def _valid_phone_digits(cleaned: str) -> bool:
+    digits = re.sub(r"\D", "", cleaned)
+    # E.164 allows up to 15 digits; require at least 7 to skip short codes.
+    return 7 <= len(digits) <= 15
+
+
+def _extract_phone(html: str, body: str) -> str:
+    """Best-effort company phone. tel: links first (intentional, clean),
+    then numbers next to an explicit phone label. Bare numbers ignored."""
+    for m in TEL_HREF_RE.findall(html):
+        # tel: values are often URL-encoded (%2B -> +, %20 -> space, etc.)
+        cleaned = _clean_phone(unquote(m))
+        if _valid_phone_digits(cleaned):
+            return cleaned
+    for m in PHONE_LABEL_RE.findall(body):
+        cleaned = _clean_phone(m)
+        if _valid_phone_digits(cleaned):
+            return cleaned
+    return ""
+
+
+# Homepage + at most this many contact-ish paths per site. Bounds the
+# worst case (a site that publishes neither email nor phone) so the
+# gap-fill pass stays within the GH Actions time budget.
+_MAX_PAGES_PER_SITE = 6
+
+
+def find_contact_for_website(
     context: BrowserContext,
     website_url: str,
     *,
     cache_dir: Path | None = None,
     progress: Callable[[str], None] = lambda _s: None,
-) -> str:
-    """Find a company email by scraping its public website.
+) -> WebsiteContact:
+    """Scrape a company's public website for BOTH email and phone.
 
-    Strategy:
-      1. Look up by-domain cache; return immediately on hit (even if the
-         hit is the empty string — that means we already tried and found
-         nothing).
-      2. Fetch homepage, regex emails, score, take best on-domain candidate.
-      3. If no acceptable email on homepage, try common /contact /about
-         /impressum paths sequentially, stop at first hit.
-      4. Cache the result (empty or not).
+    Visits the homepage, then common /contact /impressum-style paths,
+    pulling email + phone from each page en route. Stops as soon as both
+    are found (or the page cap is hit). Result cached per-domain as JSON.
     """
     if not website_url:
-        return ""
+        return WebsiteContact()
     domain = _domain_of(website_url)
     if not domain:
-        return ""
+        return WebsiteContact()
 
     cache_key = domain.replace(":", "_")
     cf = cache_path(cache_dir, "_websites", cache_key)
     cached = load_cached(cf)
     if cached is not None:
-        return cached.strip()
+        return _contact_from_cache(cached)
 
     scheme = urlparse(website_url).scheme or "https"
     base = f"{scheme}://{domain}"
@@ -228,23 +281,63 @@ def find_email_for_website(
         if url not in candidates_to_try:
             candidates_to_try.append(url)
 
-    found = ""
-    for try_url in candidates_to_try:
+    found_email = ""
+    found_phone = ""
+    for try_url in candidates_to_try[:_MAX_PAGES_PER_SITE]:
         html, body = _fetch_text(context, try_url)
         if not html:
             continue
-        emails = _candidate_emails(body + "\n" + html)
-        if not emails:
-            continue
-        best = _pick_best(emails, target_domain=domain)
-        if best:
-            found = best
-            progress(f"  [gapfill] {domain}: {best}  (via {try_url})")
+        if not found_email:
+            emails = _candidate_emails(body + "\n" + html)
+            best = _pick_best(emails, target_domain=domain) if emails else ""
+            if best:
+                found_email = best
+        if not found_phone:
+            ph = _extract_phone(html, body)
+            if ph:
+                found_phone = ph
+        if found_email and found_phone:
             break
 
+    if found_email or found_phone:
+        progress(f"  [gapfill] {domain}: email={found_email or '-'} phone={found_phone or '-'}")
+
+    contact = WebsiteContact(email=found_email, phone=found_phone)
     if cf is not None:
-        store_cached(cf, found)
-    return found
+        store_cached(cf, json.dumps({"email": found_email, "phone": found_phone}))
+    return contact
+
+
+def _contact_from_cache(raw: str) -> WebsiteContact:
+    """Parse a cached contact. Handles both the new JSON format and the
+    legacy bare-email-string format (older caches)."""
+    raw = raw.strip()
+    if not raw:
+        return WebsiteContact()
+    try:
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            return WebsiteContact(
+                email=(data.get("email") or "").strip(),
+                phone=(data.get("phone") or "").strip(),
+            )
+    except json.JSONDecodeError:
+        pass
+    # Legacy cache: the whole file was just the email string.
+    return WebsiteContact(email=raw)
+
+
+def find_email_for_website(
+    context: BrowserContext,
+    website_url: str,
+    *,
+    cache_dir: Path | None = None,
+    progress: Callable[[str], None] = lambda _s: None,
+) -> str:
+    """Backward-compatible wrapper returning just the email."""
+    return find_contact_for_website(
+        context, website_url, cache_dir=cache_dir, progress=progress
+    ).email
 
 
 # ---------------------------------------------------------------------------
@@ -280,7 +373,7 @@ def _gap_fill_worker(
             if task is _STOP:
                 return
             idx, _url = task
-            result_q.put((idx, "", f"worker init failed: {e!r}"))
+            result_q.put((idx, WebsiteContact(), f"worker init failed: {e!r}"))
         return
     try:
         browser = pw.chromium.launch(headless=True)
@@ -295,7 +388,7 @@ def _gap_fill_worker(
             if task is _STOP:
                 return
             idx, _url = task
-            result_q.put((idx, "", f"worker init failed: {e!r}"))
+            result_q.put((idx, WebsiteContact(), f"worker init failed: {e!r}"))
         return
 
     try:
@@ -305,14 +398,14 @@ def _gap_fill_worker(
                 return
             idx, website_url = task
             try:
-                email = find_email_for_website(
+                contact = find_contact_for_website(
                     ctx, website_url, cache_dir=cache_dir, progress=progress
                 )
                 err = ""
             except Exception as e:
-                email = ""
+                contact = WebsiteContact()
                 err = repr(e)
-            result_q.put((idx, email, err))
+            result_q.put((idx, contact, err))
     finally:
         try:
             browser.close()
@@ -330,9 +423,9 @@ def gap_fill_concurrent(
     n_workers: int = 8,
     cache_dir: Path | None = None,
     progress: Callable[[str], None] = lambda _s: None,
-) -> Iterator[tuple[int, str, str]]:
-    """Run gap-fill across `n_workers` threads. Yields (idx, email, err)
-    in completion order (not input order)."""
+) -> Iterator[tuple[int, WebsiteContact, str]]:
+    """Run gap-fill across `n_workers` threads. Yields
+    (idx, WebsiteContact, err) in completion order (not input order)."""
     item_list = list(items)
     if not item_list:
         return

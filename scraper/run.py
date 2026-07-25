@@ -96,28 +96,29 @@ def main() -> int:
             snapshot(leads)
     snapshot(leads)  # final snapshot after phase 1
 
-    # Phase 2: for leads with no email but a known website, hit the
-    # company's own site and try to find one. Skipped with --no-gap-fill.
-    # Runs concurrently across `--gap-fill-workers` threads since each
-    # company website is on a different domain.
-    gap_filled = 0
+    # Phase 2: for leads that are missing an email OR a phone but have a
+    # known website, visit the company's own site and harvest whatever's
+    # there. Skipped with --no-gap-fill. Runs concurrently across
+    # `--gap-fill-workers` threads since each website is a different domain.
+    email_filled = 0
+    phone_filled = 0
     gap_attempted = 0
     if not args.no_gap_fill:
         candidates = [
             (i, l)
             for i, l in enumerate(leads)
-            if not l.company_email and l.company_website
+            if l.company_website and (not l.company_email or not l.company_phone)
         ]
         if candidates:
             n_workers = max(1, args.gap_fill_workers)
             print(
-                f"\n[gapfill] {len(candidates)} leads need email — "
+                f"\n[gapfill] {len(candidates)} leads missing email and/or phone — "
                 f"visiting their websites concurrently ({n_workers} workers)"
             )
             items = [(i, lead.company_website) for i, lead in candidates]
             idx_to_lead = {i: lead for i, lead in candidates}
             done = 0
-            for orig_idx, email, err in gap_fill_concurrent(
+            for orig_idx, contact, err in gap_fill_concurrent(
                 items,
                 n_workers=n_workers,
                 cache_dir=cache_dir,
@@ -126,17 +127,25 @@ def main() -> int:
                 done += 1
                 gap_attempted += 1
                 lead = idx_to_lead[orig_idx]
-                if email:
-                    leads[orig_idx] = dataclasses.replace(
-                        lead,
-                        company_email=email,
+                updates: dict = {}
+                # Only fill what the platform didn't already give us —
+                # never overwrite a platform-sourced email/phone.
+                if contact.email and not lead.company_email:
+                    updates.update(
+                        company_email=contact.email,
                         email_source="company_website",
                         email_confidence="medium",
                     )
-                    gap_filled += 1
+                    email_filled += 1
+                if contact.phone and not lead.company_phone:
+                    updates["company_phone"] = contact.phone
+                    phone_filled += 1
+                if updates:
+                    leads[orig_idx] = dataclasses.replace(lead, **updates)
                 print(
                     f"[gapfill] {done:>4}/{len(candidates)}: "
-                    f"{lead.company_name!r} -> {email or '-'}"
+                    f"{lead.company_name!r} -> "
+                    f"email={contact.email or '-'} phone={contact.phone or '-'}"
                     + (f"  ERR: {err}" if err else "")
                 )
                 if done % SNAPSHOT_EVERY == 0:
@@ -155,8 +164,9 @@ def main() -> int:
         f"\n[run] wrote {total} rows to {out}\n"
         f"      with_email={with_email} ({pct(with_email)}%)  "
         f"with_phone={with_phone} ({pct(with_phone)}%)  "
-        f"fetch_failed={fetch_failed}  "
-        f"gap_filled={gap_filled}/{gap_attempted}"
+        f"fetch_failed={fetch_failed}\n"
+        f"      gapfill: attempted={gap_attempted}  "
+        f"email_filled={email_filled}  phone_filled={phone_filled}"
     )
     return 0
 

@@ -257,7 +257,11 @@ def _fetch_detail_html(
             return None
         page.wait_for_timeout(500)
         return page.content()
-    except PlaywrightTimeoutError:
+    except Exception:
+        # Includes the "page is navigating and changing the content"
+        # error some detail pages throw when they JS-redirect mid-fetch.
+        # A failed fetch is non-fatal — the lead just keeps its listing
+        # data and gets a "detail fetch failed" note.
         return None
     finally:
         try:

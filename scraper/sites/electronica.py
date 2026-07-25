@@ -320,7 +320,7 @@ def _fetch_detail_html(
             return None
         page.wait_for_timeout(300)
         return page.content()
-    except PlaywrightTimeoutError:
+    except Exception:
         return None
     finally:
         try:

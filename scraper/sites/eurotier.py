@@ -304,7 +304,7 @@ def _fetch_detail_html(
             return None
         _wait_for_react_content(page)
         return page.content()
-    except PlaywrightTimeoutError:
+    except Exception:
         return None
     finally:
         try:

@@ -176,7 +176,7 @@ def _fetch_profile_html(
             return None
         page.wait_for_timeout(500)
         return page.content()
-    except PlaywrightTimeoutError:
+    except Exception:
         return None
     finally:
         try:
@@ -203,7 +203,7 @@ def _find_slug_via_exhibitor_page(
         html = page.content()
         m = EXHIBITOR_PROFILE_HREF_PATTERN.search(html)
         return m.group(1) if m else None
-    except PlaywrightTimeoutError:
+    except Exception:
         return None
     finally:
         try:
