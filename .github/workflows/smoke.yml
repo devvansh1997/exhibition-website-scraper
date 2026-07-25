@@ -1,0 +1,52 @@
+name: Listing Smoke Test
+
+# Canary for silent DOM-change breakage. If a site rewrites its markup and
+# a listing selector stops matching, this goes red so we find out before the
+# client gets an empty CSV — rather than after.
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    # Every Monday 06:00 UTC. Weekly is enough — these shows don't change
+    # their markup often, and a red run notifies the repo owner by default.
+    - cron: "0 6 * * 1"
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install Python deps
+        run: |
+          pip install --upgrade pip
+          pip install playwright
+
+      - name: Cache Playwright browsers
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('pyproject.toml') }}
+
+      - name: Install Playwright chromium
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: python -m playwright install --with-deps chromium
+
+      - name: Install Playwright system deps (cached browser path)
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        run: python -m playwright install-deps chromium
+
+      - name: Run listing smoke test
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: python -m tests.smoke_listing
