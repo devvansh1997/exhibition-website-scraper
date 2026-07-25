@@ -20,7 +20,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
-from urllib.parse import urljoin, urlparse, urlsplit, urlunsplit, parse_qs, urlencode
+from urllib.parse import urlparse, urlsplit, urlunsplit, parse_qs, urlencode
 
 from playwright.sync_api import (
     BrowserContext,
@@ -34,8 +34,16 @@ from scraper.core.politeness import USER_AGENT, jittered_sleep
 from scraper.core.types import Lead, ProgressFn, Scraper, _NULL_PROGRESS
 
 ORIGIN = "https://digital.eurotier.com"
-DETAIL_LINK_SELECTOR = "a[href*='/newfront/exhibitor/']"
-SLUG_FROM_URL_RE = re.compile(r"/newfront/exhibitor/([^/?#]+)")
+# The listing has emitted both "/newfront/exhibitor/{slug}" (older) and
+# "/exhibitor/{slug}" (current) hrefs at different times. Match the
+# "/exhibitor/{slug}" tail either way; the trailing slash keeps us from
+# matching the "/marketplace/exhibitors" nav link.
+DETAIL_LINK_SELECTOR = "a[href*='/exhibitor/']"
+SLUG_FROM_URL_RE = re.compile(r"/exhibitor/([^/?#]+)")
+# Detail pages are served under /newfront/exhibitor/{slug}, which works
+# regardless of which href form the listing used, so we rebuild the URL
+# from the slug rather than trusting the listing href.
+DETAIL_URL_TEMPLATE = ORIGIN + "/newfront/exhibitor/{slug}"
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 
 SKIP_HOSTS = {
@@ -85,9 +93,7 @@ def _extract_listings(page: Page) -> list[_Listing]:
         if slug in seen:
             continue
         seen.add(slug)
-        if not href.startswith("http"):
-            href = urljoin(ORIGIN, href)
-        out.append(_Listing(slug=slug, detail_url=href))
+        out.append(_Listing(slug=slug, detail_url=DETAIL_URL_TEMPLATE.format(slug=slug)))
     return out
 
 
@@ -237,6 +243,28 @@ def _parse_address_block(body_text: str, name: str) -> tuple[str, str, str]:
     return ", ".join(addr_parts), country, phone
 
 
+# EuroTier (a German DLG fair) renders the stand into two tagged spans in
+# the page HTML, e.g.:
+#   <span data-styleid="exhibitorHall">Halle 25</span> / <span
+#   data-styleid="exhibitorStand">25G19</span>
+# The value is NOT reliably in the page's visible inner_text (it renders in
+# a location widget that hydrates late), so we parse the HTML spans directly
+# — that's stable. Combined form: "Halle 25/25G19". Not every exhibitor has
+# an assigned stand, so this stays best-effort.
+BOOTH_HALL_RE = re.compile(r'data-styleid="exhibitorHall"[^>]*>([^<]+)<')
+BOOTH_STAND_RE = re.compile(r'data-styleid="exhibitorStand"[^>]*>([^<]+)<')
+
+
+def _extract_booth(html: str) -> str:
+    hall_m = BOOTH_HALL_RE.search(html or "")
+    stand_m = BOOTH_STAND_RE.search(html or "")
+    hall = hall_m.group(1).strip() if hall_m else ""
+    stand = stand_m.group(1).strip() if stand_m else ""
+    if hall and stand:
+        return f"{hall}/{stand}"
+    return hall or stand
+
+
 def _parse_detail(page: Page, html: str, listing: _Listing) -> Lead:
     # Name: first prominent heading; if not present, derive from slug
     name = ""
@@ -260,11 +288,12 @@ def _parse_detail(page: Page, html: str, listing: _Listing) -> Lead:
     email = _pick_company_email(page, html)
     website = _pick_company_website(page, body)
     address, country, phone = _parse_address_block(body, name)
+    booth = _extract_booth(html)
 
     return Lead(
         company_name=name,
         country=country,
-        booth_number="",  # not reliably shown on Eurotier detail pages
+        booth_number=booth,
         company_email=email,
         company_phone=phone,
         company_website=website,
@@ -279,19 +308,33 @@ import time as _time
 
 
 def _wait_for_react_content(page: Page, timeout_s: float = 15.0) -> None:
-    """Eurotier's React app fetches exhibitor data asynchronously after
-    DOMContentLoaded. Wait until the body text shows one of the section
-    labels that only appear once data has rendered."""
+    """Eurotier's React app hydrates the exhibitor data progressively after
+    DOMContentLoaded — the address/phone block, then the Meet/Message CTA,
+    then the stand (Halle …) + website, then categories, etc.
+
+    Section headings ("Matchmaking Information", "Categories") live in the
+    static shell and appear before the data does, so waiting on them
+    snapshots too early and randomly drops the stand + website. Instead we
+    wait for the body text to STABILISE: once two consecutive reads ~0.6s
+    apart are identical (and a real data marker like a phone/email/'Halle'
+    hint is present), the page is done rendering. Bounded by timeout_s."""
     deadline = _time.monotonic() + timeout_s
+    prev = None
+    stable_hits = 0
     while _time.monotonic() < deadline:
         try:
             body = page.locator("body").inner_text()
         except Exception:
             body = ""
-        upper = body.upper()
-        if "MATCHMAKING" in upper or "CATEGORIES" in upper or "COMPANY EMAIL" in upper:
-            return
-        _time.sleep(0.4)
+        if body and body == prev:
+            stable_hits += 1
+            # Two identical reads = rendering has settled.
+            if stable_hits >= 1:
+                return
+        else:
+            stable_hits = 0
+        prev = body
+        _time.sleep(0.6)
 
 
 def _fetch_detail_html(
